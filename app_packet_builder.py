@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,13 +11,10 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 
-st.set_page_config(page_title='Department Packets - Wide Excel ZIP (v3.1)', layout='wide')
-st.title('Department Packets - Wide Excel ZIP (v3.1)')
+st.set_page_config(page_title='Department Packets - Wide Excel ZIP (v3.3)', layout='wide')
+st.title('Department Packets - Wide Excel ZIP (v3.3)')
 
-st.markdown('''
-This version fills **0** for missing FSW metric values (so departments see 0 instead of blank).
-One Excel per Month x Department, with sheets: Central, West, East.
-''')
+st.markdown('''\n**Guarantee every FSW appears on every department sheet.**\n\n- Upload **FSW_Master.xlsx/csv**, **metrics_map.csv**.\n- (Optional) Upload a **Roster.xlsx/csv** with columns: Area, Campus, FSW. If provided, it is the source of truth for who appears.\n- Output: ZIP with one Excel per **Month x Department**, tabs **Central/West/East**.\n- Layout: **Month | Area | Campus | FSW | [Metric, Department - Metric ...] | Validated | Validation_Date | Issues | Services | Referrals | Notes**.\n- Missing FSW metric values are filled with **0**. Department cells left blank for data entry.\n''')
 
 AREA_SHEETS = ['Central','West','East']
 READONLY_FILL = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
@@ -88,24 +84,26 @@ def add_validations(ws, col_letter, max_row):
     ws.add_data_validation(dv)
     dv.add(f'{col_letter}2:{col_letter}{max_row}')
 
-def build_roster_for_month(master_month_df):
-    return master_month_df[['Area','Campus','FSW']].drop_duplicates().sort_values(['Area','Campus','FSW'])
+def ensure_roster(master_month_df, roster_df=None):
+    if roster_df is not None and set(['Area','Campus','FSW']).issubset(roster_df.columns):
+        roster = roster_df[['Area','Campus','FSW']].drop_duplicates()
+    else:
+        roster = master_month_df[['Area','Campus','FSW']].drop_duplicates()
+    roster = roster.assign(Area=roster['Area'].astype(str).str.strip(),
+                           Campus=roster['Campus'].astype(str).str.strip(),
+                           FSW=roster['FSW'].astype(str).str.strip())
+    return roster.sort_values(['Area','Campus','FSW'])
 
 def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, df_dept_area, metrics_order):
     ws = wb.create_sheet(sheet_name)
-
-    # Interleaved headers
     interleaved = []
     for m in metrics_order:
         interleaved += [m, f'Department - {m}']
-
     headers = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
     ws.append(headers)
 
-    # Pivot FSW values by metric
     if not df_dept_area.empty:
-        pv = df_dept_area.pivot_table(index=['Area','Campus','FSW'], columns='Metric',
-                                      values='FSW_Value', aggfunc='first')
+        pv = df_dept_area.pivot_table(index=['Area','Campus','FSW'], columns='Metric', values='FSW_Value', aggfunc='first')
         for m in metrics_order:
             if m not in pv.columns:
                 pv[m] = np.nan
@@ -120,14 +118,11 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, df_dept_area, 
         for m in metrics_order:
             base[m] = np.nan
 
-    # >>> NEW: fill missing FSW metric values with 0 <<<
     if metrics_order:
         base[metrics_order] = base[metrics_order].fillna(0)
 
-    # Add department columns and trailing columns
     for m in metrics_order:
-        base[f'Department - {m}'] = ''  # keep blank for departments to fill
-
+        base[f'Department - {m}'] = ''
     base['Validated'] = ''
     base['Validation_Date'] = ''
     base['Issues'] = ''
@@ -135,60 +130,56 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, df_dept_area, 
     base['Referrals'] = ''
     base['Notes'] = ''
 
-    # Order + Month
     base.insert(0, 'Month', month_value)
-    ordered_cols = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
-    base = base[ordered_cols]
+    ordered = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
+    base = base[ordered]
 
-    # Write rows
     for r in dataframe_to_rows(base, index=False, header=False):
         ws.append(r)
 
     add_styles_filters(ws)
 
-    # Conditional format pairs
     metric_pairs = []
-    start_col_idx = 5  # Month..FSW = 4
+    start_idx = 5
     for i, m in enumerate(metrics_order):
-        fsw_col_idx = start_col_idx + 2*i
-        dept_col_idx = start_col_idx + 2*i + 1
-        metric_pairs.append((excel_col(fsw_col_idx), excel_col(dept_col_idx)))
+        fsw_idx = start_idx + 2*i
+        dept_idx = start_idx + 2*i + 1
+        metric_pairs.append((excel_col(fsw_idx), excel_col(dept_idx)))
     add_match_colors(ws, metric_pairs)
 
-    # Validated dropdown
-    validated_col_idx = 4 + 2*len(metrics_order) + 1
-    add_validations(ws, excel_col(validated_col_idx), ws.max_row)
+    validated_idx = 4 + 2*len(metrics_order) + 1
+    add_validations(ws, excel_col(validated_idx), ws.max_row)
 
     return ws
 
-def build_workbook_bytes(master_month_df, dept_df, month_value, metrics_order):
+def build_workbook_bytes(master_month_df, dept_df, month_value, metrics_order, roster_df=None):
     wb = Workbook()
     wb.remove(wb.active)
-
-    roster = build_roster_for_month(master_month_df)
-
+    roster_all = ensure_roster(master_month_df, roster_df)
     for area in AREA_SHEETS:
-        roster_area = roster[roster['Area'].astype(str).str.strip().str.casefold() == area.lower()].copy()
+        roster_area = roster_all[roster_all['Area'].str.casefold() == area.lower()].copy()
         dept_area = dept_df[dept_df['Area'].astype(str).str.strip().str.casefold() == area.lower()].copy()
         build_wide_sheet(wb, area, month_value, roster_area, dept_area, metrics_order)
-
     bio = BytesIO()
     wb.save(bio)
     return bio.getvalue()
 
-# ---- UI ----
+# UI
 left, right = st.columns(2)
 with left:
     fsw_up = st.file_uploader('FSW_Master (xlsx/csv)', type=['xlsx','csv'])
 with right:
     mm_up = st.file_uploader('metrics_map.csv', type=['csv'])
 
+roster_up = st.file_uploader('Optional: Roster (xlsx/csv) with Area, Campus, FSW', type=['xlsx','csv'])
+
 if fsw_up is None or mm_up is None:
-    st.info('Upload both files to continue.')
+    st.info('Upload FSW_Master and metrics_map to continue.')
     st.stop()
 
 fsw = load_any(fsw_up)
 mmap = load_any(mm_up)
+roster_df = load_any(roster_up) if roster_up is not None else None
 
 need_fsw = {'Month','Area','Campus','FSW','Metric','Value'}
 if missing := (need_fsw - set(fsw.columns)):
@@ -214,7 +205,9 @@ if months: f = f[f['Month'].isin(months)]
 if depts:  f = f[f['Department'].isin(depts)]
 if camp:   f = f[f['Campus'].isin(camp)]
 
-st.write(f"Rows selected: **{len(f)}** | FSWs: **{f['FSW'].nunique()}** | Metrics: **{f['Metric'].nunique()}**")
+st.write(f"Rows selected: **{len(f)}** | FSWs (in data): **{f['FSW'].nunique()}** | Metrics: **{f['Metric'].nunique()}**")
+if roster_df is not None and set(['Area','Campus','FSW']).issubset(roster_df.columns):
+    st.write(f"Roster FSWs: **{roster_df['FSW'].nunique()}** across Areas: {', '.join(sorted(roster_df['Area'].dropna().unique()))}")
 
 if st.button('Build ZIP of Department Packets (Excel)'):
     if f.empty:
@@ -226,9 +219,8 @@ if st.button('Build ZIP of Department Packets (Excel)'):
                 metrics_order = mmap[mmap['Department'] == dept]['Metric'].tolist()
                 master_month = master[master['Month'] == month][['Month','Area','Campus','FSW','Metric','FSW_Value','Department']].copy()
                 dept_only = chunk[chunk['Metric'].isin(metrics_order)].copy()
-                xbytes = build_workbook_bytes(master_month, dept_only, month, metrics_order)
+                xbytes = build_workbook_bytes(master_month, dept_only, month, metrics_order, roster_df=roster_df)
                 zf.writestr(f"{month}/{dept}_DEPT.xlsx", xbytes)
         memzip.seek(0)
         stamp = datetime.now().strftime('%Y%m%d_%H%M')
-        st.download_button('Download Department Packets ZIP', data=memzip,
-                           file_name=f'DeptPackets_DEPT_{stamp}.zip', mime='application/zip')
+        st.download_button('Download Department Packets ZIP', data=memzip, file_name=f'DeptPackets_DEPT_{stamp}.zip', mime='application/zip')
