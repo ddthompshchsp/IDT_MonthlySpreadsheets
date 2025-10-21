@@ -1,140 +1,194 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date
+from io import BytesIO
+from zipfile import ZipFile, ZIP_DEFLATED
+from datetime import datetime
 
-st.set_page_config(page_title="FSW Validation — Wide View", layout="wide")
-st.title("FSW Validation — Wide View (Metrics as Columns)")
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.formatting.rule import FormulaRule
+
+st.set_page_config(page_title='Department Packets - Wide Excel ZIP', layout='wide')
+st.title('Department Packets - Wide Excel ZIP')
 
 st.markdown("""
-Upload **FSW_Master** and **metrics_map.csv**. Filter by Month/Area/Campus/FSW/Department.  
-This view shows one row per FSW with **metrics as columns**, plus editable **- Validated** columns on the right.
+Build prefilled Excel packets for departments to enter validations.
+
+- Upload **FSW_Master.xlsx/.csv** and **metrics_map.csv**
+- Generates a ZIP: one **Excel workbook** per **Month x Department**
+- Sheets inside each workbook: **Central, West, East**
+- Columns: **Area | Campus | FSW | [Metric] | Department - [Metric]** for every metric
+- Conditional formatting: green if Department equals FSW value, red if it differs
 """)
 
+AREA_SHEETS = ['Central','West','East']
+READONLY_FILL = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
+GREEN_FILL = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+RED_FILL   = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+
 def _norm(s):
-    return s.replace("\u2013","-").replace("\u2014","-").strip() if isinstance(s,str) else s
+    return s.replace('\u2013','-').replace('\u2014','-').strip() if isinstance(s,str) else s
 
 def load_any(uploaded):
     if uploaded is None: return None
-    name = getattr(uploaded, "name", "").lower()
-    if name.endswith(".csv"):
+    name = getattr(uploaded, 'name', '').lower()
+    if name.endswith('.csv'):
         df = pd.read_csv(uploaded)
     else:
-        df = pd.read_excel(uploaded, engine="openpyxl")
+        df = pd.read_excel(uploaded, engine='openpyxl')
     for c in df.columns:
         if df[c].dtype == object:
             df[c] = df[c].map(_norm)
     return df
 
-# Uploads
+def excel_col(n:int)->str:
+    s=''
+    while n:
+        n, r = divmod(n-1, 26)
+        s = chr(65+r) + s
+    return s
+
+def add_styles_filters(ws):
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical='center')
+    ws.freeze_panes = 'D2'
+    last_col = excel_col(ws.max_column)
+    ws.auto_filter.ref = f'A1:{last_col}{ws.max_row}'
+    for i in range(1, ws.max_column+1):
+        ws.column_dimensions[excel_col(i)].width = 16
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 18
+    ws.column_dimensions['C'].width = 22
+    for cell in ws['A'][1:]: cell.fill = READONLY_FILL
+    for cell in ws['B'][1:]: cell.fill = READONLY_FILL
+    for cell in ws['C'][1:]: cell.fill = READONLY_FILL
+
+def add_match_colors(ws, metrics_order):
+    num_metrics = len(metrics_order)
+    start_fsw = 4
+    start_dept = 4 + num_metrics
+    for i in range(num_metrics):
+        fsw_col = excel_col(start_fsw + i)
+        dept_col = excel_col(start_dept + i)
+        for r in range(2, ws.max_row+1):
+            d_cell = f'{dept_col}{r}'
+            c_cell = f'{fsw_col}{r}'
+            ws.conditional_formatting.add(
+                d_cell,
+                FormulaRule(formula=[f'AND(NOT(ISBLANK({d_cell})), {d_cell}<>${c_cell})'],
+                            stopIfTrue=False, fill=RED_FILL)
+            )
+            ws.conditional_formatting.add(
+                d_cell,
+                FormulaRule(formula=[f'AND(NOT(ISBLANK({d_cell})), {d_cell}=${c_cell})'],
+                            stopIfTrue=False, fill=GREEN_FILL)
+            )
+
+def build_wide_sheet(wb, sheet_name, df_area, metrics_order):
+    ws = wb.create_sheet(sheet_name)
+    headers = ['Area','Campus','FSW'] + metrics_order + [f'Department - {m}' for m in metrics_order]
+    ws.append(headers)
+
+    if not df_area.empty:
+        pv = df_area.pivot_table(index=['Area','Campus','FSW'], columns='Metric', values='FSW_Value', aggfunc='first')
+        for m in metrics_order:
+            if m not in pv.columns:
+                pv[m] = np.nan
+        pv = pv[metrics_order]
+        wide = pv.reset_index()
+        for m in metrics_order:
+            wide[f'Department - {m}'] = np.nan
+        for r in dataframe_to_rows(wide, index=False, header=False):
+            ws.append(r)
+
+    add_styles_filters(ws)
+    add_match_colors(ws, metrics_order)
+    return ws
+
+def build_workbook_bytes(df_md, metrics_order):
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    for area in AREA_SHEETS:
+        sub = df_md[df_md['Area'].astype(str).str.strip().str.casefold() == area.lower()]
+        build_wide_sheet(wb, area, sub, metrics_order)
+
+    ws = wb.create_sheet('Summary', 0)
+    ws['A1'].value = 'Dashboard / Summary'
+    ws['A1'].font = Font(bold=True, size=14)
+    ws.append([])
+    ws.append(['Area','Total Rows','Department Cells Entered'])
+    for cell in ws[3]:
+        cell.font = Font(bold=True)
+    row = 4
+    for area in AREA_SHEETS:
+        sname = area
+        ws[f'A{row}'] = area
+        ws[f'B{row}'] = f"=MAX(ROWS('{sname}'!A2:A1048576),0)"
+        ws[f'C{row}'] = f"=SUMPRODUCT(--(LEN('{sname}'!D2:ZZ1048576)>0))"
+        row += 1
+    for col in range(1, 4):
+        ws.column_dimensions[excel_col(col)].width = 26
+    ws.freeze_panes = 'A4'
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+# UI
 left, right = st.columns(2)
 with left:
-    fsw_up = st.file_uploader("FSW_Master (xlsx/csv)", type=["xlsx","csv"])
+    fsw_up = st.file_uploader('FSW_Master (xlsx/csv)', type=['xlsx','csv'])
 with right:
-    map_up = st.file_uploader("metrics_map.csv", type=["csv"])
+    mm_up = st.file_uploader('metrics_map.csv', type=['csv'])
 
-fsw = load_any(fsw_up)
-mmap = load_any(map_up)
-
-if fsw is None or mmap is None:
-    st.info("Upload both files to continue.")
+if fsw_up is None or mm_up is None:
+    st.info('Upload both files to continue.')
     st.stop()
 
-need_fsw = {"Month","Area","Campus","FSW","Metric","Value"}
+fsw = load_any(fsw_up)
+mmap = load_any(mm_up)
+
+need_fsw = {'Month','Area','Campus','FSW','Metric','Value'}
 if missing := (need_fsw - set(fsw.columns)):
-    st.error(f"FSW_Master missing columns: {sorted(missing)}"); st.stop()
-if not {"Department","Metric"}.issubset(mmap.columns):
-    st.error("metrics_map.csv must have columns: Department, Metric"); st.stop()
+    st.error(f'FSW_Master missing columns: {sorted(missing)}'); st.stop()
+if not {'Department','Metric'}.issubset(mmap.columns):
+    st.error('metrics_map.csv must have columns: Department, Metric'); st.stop()
 
-fsw = fsw.rename(columns={"Value":"FSW_Value"})
-mmap["Metric"] = mmap["Metric"].map(_norm)
-mmap["Department"] = mmap["Department"].map(_norm)
-master = fsw.merge(mmap[["Metric","Department"]], on="Metric", how="left").dropna(subset=["Department"])
+fsw = fsw.rename(columns={'Value':'FSW_Value'})
+master = fsw.merge(mmap[['Metric','Department']], on='Metric', how='left').dropna(subset=['Department'])
 
-# Filters
-st.sidebar.header("Filters")
-months = [m for m in ["Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr","May"] if m in master["Month"].unique().tolist()]
-depts  = sorted(master["Department"].unique().tolist())
-areas  = sorted(master["Area"].dropna().unique().tolist())
-campi  = sorted(master["Campus"].dropna().unique().tolist())
-fsws   = sorted(master["FSW"].dropna().unique().tolist())
+st.subheader('Filters')
+c1,c2,c3 = st.columns(3)
+months_all = [m for m in ['Sep','Oct','Nov','Dec','Jan','Feb','Mar','Apr','May'] if m in master['Month'].unique().tolist()]
+depts_all  = sorted(master['Department'].unique().tolist())
+camp_all   = sorted(master['Campus'].dropna().unique().tolist())
 
-m_sel = st.sidebar.multiselect("Month(s)", months, default=months)
-d_sel = st.sidebar.multiselect("Department(s)", depts, default=depts)
-a_sel = st.sidebar.multiselect("Area(s)", areas, default=areas)
-c_sel = st.sidebar.multiselect("Campus(es)", campi, default=campi)
-f_sel = st.sidebar.multiselect("FSW(s)", fsws, default=fsws)
+months = c1.multiselect('Months', months_all, default=months_all)
+depts  = c2.multiselect('Departments', depts_all, default=depts_all)
+camp   = c3.multiselect('Campuses', camp_all, default=camp_all)
 
 f = master.copy()
-if m_sel: f = f[f["Month"].isin(m_sel)]
-if d_sel: f = f[f["Department"].isin(d_sel)]
-if a_sel: f = f[f["Area"].isin(a_sel)]
-if c_sel: f = f[f["Campus"].isin(c_sel)]
-if f_sel: f = f[f["FSW"].isin(f_sel)]
+if months: f = f[f['Month'].isin(months)]
+if depts:  f = f[f['Department'].isin(depts)]
+if camp:   f = f[f['Campus'].isin(camp)]
 
-# Choose one department for a consistent metric set (recommended)
-dept_one = st.sidebar.selectbox("Focus Department (optional)", ["(All)"] + depts, index=0)
-if dept_one != "(All)":
-    f = f[f["Department"] == dept_one]
-    metrics_order = mmap[mmap["Department"] == dept_one]["Metric"].tolist()
-else:
-    metrics_order = sorted(f["Metric"].dropna().unique().tolist())
+st.write(f"Rows selected: **{len(f)}** | FSWs: **{f['FSW'].nunique()}** | Metrics: **{f['Metric'].nunique()}**")
 
-# Wide table
-show_month = st.sidebar.checkbox("Include Month as a column", value=True)
-id_cols = ["Area","Campus","FSW"] + (["Month"] if show_month else [])
-if f.empty:
-    st.warning("No rows after filters."); st.stop()
-
-pv = f.pivot_table(index=id_cols, columns="Metric", values="FSW_Value", aggfunc="first")
-
-# Ensure all chosen metrics exist as columns
-for m in metrics_order:
-    if m not in pv.columns:
-        pv[m] = np.nan
-pv = pv[metrics_order]  # order
-wide = pv.reset_index()
-
-# Add editable validated columns
-for m in metrics_order:
-    wide[f"{m} - Validated"] = np.nan
-
-st.subheader("Wide Validation Table")
-edited = st.data_editor(
-    wide,
-    use_container_width=True,
-    height=620,
-    column_config={
-        **{m: st.column_config.NumberColumn(help="FSW value (read-only here)") for m in metrics_order},
-        **{f"{m} - Validated": st.column_config.NumberColumn(help="Enter validated value") for m in metrics_order},
-    },
-)
-
-# Quick per-row match %
-def row_match_status(row):
-    flags = []
-    for m in metrics_order:
-        v = row.get(m)
-        vv = row.get(f"{m} - Validated")
-        if pd.notna(vv):
-            flags.append(int(pd.notna(v) and (vv == v)))
-    if len(flags)==0:
-        return np.nan
-    return round(100.0 * sum(flags)/len(flags), 1)
-
-out = edited.copy()
-out["% Metrics Matched (row)"] = out.apply(row_match_status, axis=1)
-
-with st.expander("Preview Output", expanded=False):
-    st.dataframe(out, use_container_width=True)
-
-# Export CSV
-fname = "Dept_Validated_WIDE.csv" if dept_one in ("", "(All)") else f"Dept_Validated_WIDE_{dept_one}.csv"
-st.download_button(
-    "⬇️ Export Wide CSV",
-    out.to_csv(index=False).encode("utf-8"),
-    file_name=fname,
-    mime="text/csv"
-)
-
-st.caption("Tip: Pick one Department to keep the metric set consistent across columns.")
+if st.button('Build ZIP of Department Packets (Excel)'):
+    if f.empty:
+        st.warning('No rows after filters.')
+    else:
+        memzip = BytesIO()
+        with ZipFile(memzip, 'w', ZIP_DEFLATED) as zf:
+            for (month, dept), chunk in f.groupby(['Month','Department'], dropna=False):
+                metrics_order = mmap[mmap['Department'] == dept]['Metric'].tolist()
+                chunk = chunk[chunk['Metric'].isin(metrics_order)].copy()
+                xbytes = build_workbook_bytes(chunk, metrics_order)
+                zf.writestr(f"{month}/{dept}_DEPT.xlsx", xbytes)
+        memzip.seek(0)
+        stamp = datetime.now().strftime('%Y%m%d_%H%M')
+        st.download_button('Download Department Packets ZIP', data=memzip, file_name=f'DeptPackets_DEPT_{stamp}.zip', mime='application/zip')
