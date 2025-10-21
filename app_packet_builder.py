@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,15 +12,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 
-st.set_page_config(page_title='Department Packets - Wide Excel ZIP (v2)', layout='wide')
-st.title('Department Packets - Wide Excel ZIP (v2)')
+st.set_page_config(page_title='Department Packets - Wide Excel ZIP (v3.1)', layout='wide')
+st.title('Department Packets - Wide Excel ZIP (v3.1)')
 
 st.markdown('''
-Build prefilled Excel packets for departments to enter validations. One Excel per Month x Department.
-
-- Sheets inside each workbook: **Central, West, East**
-- Columns (left to right): **Month | Area | Campus | FSW | [Metric] | Department - [Metric] ... | Validated | Validation_Date | Issues | Services | Referrals | Notes**
-- Conditional formatting: green if Department matches FSW value, red otherwise
+This version fills **0** for missing FSW metric values (so departments see 0 instead of blank).
+One Excel per Month x Department, with sheets: Central, West, East.
 ''')
 
 AREA_SHEETS = ['Central','West','East']
@@ -51,84 +49,70 @@ def excel_col(n:int)->str:
     return s
 
 def add_styles_filters(ws):
-    # header
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(vertical='center')
-    # freeze Month/Area/Campus/FSW
     ws.freeze_panes = 'E2'
-    # filter
     last_col = excel_col(ws.max_column)
     ws.auto_filter.ref = f'A1:{last_col}{ws.max_row}'
-    # widths
     for i in range(1, ws.max_column+1):
         ws.column_dimensions[excel_col(i)].width = 16
-    ws.column_dimensions['A'].width = 8   # Month
-    ws.column_dimensions['B'].width = 12  # Area
-    ws.column_dimensions['C'].width = 18  # Campus
-    ws.column_dimensions['D'].width = 22  # FSW
-    # read-only fill for ID columns
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 18
+    ws.column_dimensions['D'].width = 22
     for col_letter in ['A','B','C','D']:
         for cell in ws[col_letter][1:]:
             cell.fill = READONLY_FILL
 
-def add_match_colors(ws, metrics_order):
-    # A=Month, B=Area, C=Campus, D=FSW
-    # FSW metric block starts at E; Department block starts right after
-    num_metrics = len(metrics_order)
-    start_fsw = 5
-    start_dept = 5 + num_metrics
-    for i in range(num_metrics):
-        fsw_col = excel_col(start_fsw + i)
-        dept_col = excel_col(start_dept + i)
-        for r in range(2, ws.max_row+1):
+def add_match_colors(ws, metric_pairs, start_row=2, end_row=None):
+    if end_row is None:
+        end_row = ws.max_row
+    for fsw_col, dept_col in metric_pairs:
+        for r in range(start_row, end_row+1):
             d_cell = f'{dept_col}{r}'
             c_cell = f'{fsw_col}{r}'
-            # red when dept entered and not equal to FSW
             ws.conditional_formatting.add(
                 d_cell,
-                FormulaRule(formula=[f'AND(NOT(ISBLANK({d_cell})), {d_cell}<>${c_cell})'],
+                FormulaRule(formula=[f'AND({d_cell}<>"", {c_cell}<>"", {d_cell}<>${c_cell})'],
                             stopIfTrue=False, fill=RED_FILL)
             )
-            # green when dept entered and equal to FSW
             ws.conditional_formatting.add(
                 d_cell,
-                FormulaRule(formula=[f'AND(NOT(ISBLANK({d_cell})), {d_cell}=${c_cell})'],
+                FormulaRule(formula=[f'AND({d_cell}<>"", {c_cell}<>"", {d_cell}=${c_cell})'],
                             stopIfTrue=False, fill=GREEN_FILL)
             )
 
-def add_validations(ws, start_col_letter, max_row):
-    # dropdown for Validated column
+def add_validations(ws, col_letter, max_row):
     dv = DataValidation(type='list', formula1='"' + ','.join(VALID_STATUSES) + '"', allow_blank=True)
     ws.add_data_validation(dv)
-    dv.add(f'{start_col_letter}2:{start_col_letter}{max_row}')
+    dv.add(f'{col_letter}2:{col_letter}{max_row}')
 
 def build_roster_for_month(master_month_df):
-    # all unique FSWs present for that month (across ALL departments/metrics)
-    roster = master_month_df[['Area','Campus','FSW']].drop_duplicates().sort_values(['Area','Campus','FSW'])
-    return roster
+    return master_month_df[['Area','Campus','FSW']].drop_duplicates().sort_values(['Area','Campus','FSW'])
 
 def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, df_dept_area, metrics_order):
     ws = wb.create_sheet(sheet_name)
-    headers = ['Month','Area','Campus','FSW'] \
-              + metrics_order \
-              + [f'Department - {m}' for m in metrics_order] \
-              + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
+
+    # Interleaved headers
+    interleaved = []
+    for m in metrics_order:
+        interleaved += [m, f'Department - {m}']
+
+    headers = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
     ws.append(headers)
 
-    # pivot dept metrics for this area
+    # Pivot FSW values by metric
     if not df_dept_area.empty:
         pv = df_dept_area.pivot_table(index=['Area','Campus','FSW'], columns='Metric',
                                       values='FSW_Value', aggfunc='first')
         for m in metrics_order:
             if m not in pv.columns:
                 pv[m] = np.nan
-        pv = pv[metrics_order]
-        pv = pv.reset_index()
+        pv = pv[metrics_order].reset_index()
     else:
         pv = pd.DataFrame(columns=['Area','Campus','FSW'] + metrics_order)
 
-    # left-join roster so all FSWs appear
     base = roster_area_df.copy()
     if not pv.empty:
         base = base.merge(pv, on=['Area','Campus','FSW'], how='left')
@@ -136,9 +120,14 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, df_dept_area, 
         for m in metrics_order:
             base[m] = np.nan
 
-    # add dept entry columns and trailing columns
+    # >>> NEW: fill missing FSW metric values with 0 <<<
+    if metrics_order:
+        base[metrics_order] = base[metrics_order].fillna(0)
+
+    # Add department columns and trailing columns
     for m in metrics_order:
-        base[f'Department - {m}'] = np.nan
+        base[f'Department - {m}'] = ''  # keep blank for departments to fill
+
     base['Validated'] = ''
     base['Validation_Date'] = ''
     base['Issues'] = ''
@@ -146,19 +135,29 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, df_dept_area, 
     base['Referrals'] = ''
     base['Notes'] = ''
 
-    # prepend month (single value per workbook)
+    # Order + Month
     base.insert(0, 'Month', month_value)
+    ordered_cols = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
+    base = base[ordered_cols]
 
+    # Write rows
     for r in dataframe_to_rows(base, index=False, header=False):
         ws.append(r)
 
     add_styles_filters(ws)
-    add_match_colors(ws, metrics_order)
 
-    # Validated col letter (after Month..FSW (4) + metrics (n) + dept (n))
-    validated_col_idx = 4 + (2 * len(metrics_order)) + 1  # 1-based index -> A=1; we want the first trailing col
-    val_col_letter = excel_col(validated_col_idx)
-    add_validations(ws, val_col_letter, ws.max_row)
+    # Conditional format pairs
+    metric_pairs = []
+    start_col_idx = 5  # Month..FSW = 4
+    for i, m in enumerate(metrics_order):
+        fsw_col_idx = start_col_idx + 2*i
+        dept_col_idx = start_col_idx + 2*i + 1
+        metric_pairs.append((excel_col(fsw_col_idx), excel_col(dept_col_idx)))
+    add_match_colors(ws, metric_pairs)
+
+    # Validated dropdown
+    validated_col_idx = 4 + 2*len(metrics_order) + 1
+    add_validations(ws, excel_col(validated_col_idx), ws.max_row)
 
     return ws
 
@@ -177,7 +176,7 @@ def build_workbook_bytes(master_month_df, dept_df, month_value, metrics_order):
     wb.save(bio)
     return bio.getvalue()
 
-# ---------------- UI -----------------
+# ---- UI ----
 left, right = st.columns(2)
 with left:
     fsw_up = st.file_uploader('FSW_Master (xlsx/csv)', type=['xlsx','csv'])
@@ -200,7 +199,6 @@ if not {'Department','Metric'}.issubset(mmap.columns):
 fsw = fsw.rename(columns={'Value':'FSW_Value'})
 master = fsw.merge(mmap[['Metric','Department']], on='Metric', how='left').dropna(subset=['Department'])
 
-# Filters
 st.subheader('Filters')
 c1,c2,c3 = st.columns(3)
 months_all = [m for m in ['Sep','Oct','Nov','Dec','Jan','Feb','Mar','Apr','May'] if m in master['Month'].unique().tolist()]
@@ -218,7 +216,6 @@ if camp:   f = f[f['Campus'].isin(camp)]
 
 st.write(f"Rows selected: **{len(f)}** | FSWs: **{f['FSW'].nunique()}** | Metrics: **{f['Metric'].nunique()}**")
 
-# Build ZIP
 if st.button('Build ZIP of Department Packets (Excel)'):
     if f.empty:
         st.warning('No rows after filters.')
@@ -227,9 +224,7 @@ if st.button('Build ZIP of Department Packets (Excel)'):
         with ZipFile(memzip, 'w', ZIP_DEFLATED) as zf:
             for (month, dept), chunk in f.groupby(['Month','Department'], dropna=False):
                 metrics_order = mmap[mmap['Department'] == dept]['Metric'].tolist()
-                # full roster for the month (across all departments)
                 master_month = master[master['Month'] == month][['Month','Area','Campus','FSW','Metric','FSW_Value','Department']].copy()
-                # department-only data for pivoting
                 dept_only = chunk[chunk['Metric'].isin(metrics_order)].copy()
                 xbytes = build_workbook_bytes(master_month, dept_only, month, metrics_order)
                 zf.writestr(f"{month}/{dept}_DEPT.xlsx", xbytes)
