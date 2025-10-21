@@ -1,10 +1,8 @@
 
-import streamlit as st
+import argparse
+from pathlib import Path
 import pandas as pd
 import numpy as np
-from io import BytesIO
-from zipfile import ZipFile, ZIP_DEFLATED
-from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -16,73 +14,81 @@ READONLY_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type=
 GREEN_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 RED_FILL   = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
-st.set_page_config(page_title="Packet Builder (Prefilled Excel)", layout="wide")
-st.title("Prefilled Department Packets (Excel)")
+AREA_SHEETS = ["Central", "West", "East"]
 
-st.markdown("""
-Upload **FSW_Master** and **metrics_map.csv**, choose filters, then click **Build ZIP**.  
-The ZIP contains one workbook per **Month × Department**, with one sheet per **Campus** and built-in:
-- Validated dropdown (Validated / Mismatch / Unable to Validate)  
-- Validation_Date column (date)  
-- Red/green highlighting when Validated_Value ≠ / = FSW_Value
-""")
-
-def _norm(s):
+def norm(s):
     return s.replace("\u2013","-").replace("\u2014","-").strip() if isinstance(s,str) else s
 
-def load_any(uploaded):
-    if uploaded is None: return None
-    name = getattr(uploaded, "name", "").lower()
-    if name.endswith(".csv"):
-        df = pd.read_csv(uploaded)
-    else:
-        df = pd.read_excel(uploaded, engine="openpyxl")
-    for c in df.columns:
+def load_master(master_path: Path) -> pd.DataFrame:
+    df = pd.read_excel(master_path, sheet_name="FSW_Master", engine="openpyxl")
+    need = {"Month","Area","Campus","FSW","Metric","Value"}
+    miss = need - set(df.columns)
+    if miss:
+        raise SystemExit(f"FSW_Master is missing columns: {sorted(miss)}")
+    for c in ["Month","Area","Campus","FSW","Metric"]:
         if df[c].dtype == object:
-            df[c] = df[c].map(_norm)
+            df[c] = df[c].map(norm)
+    df = df.rename(columns={"Value":"FSW_Value"})
     return df
 
-def write_packet_excel(filename: str, df: pd.DataFrame) -> bytes:
-    wb = Workbook()
-    wb.remove(wb.active)
+def load_metrics_map(path: Path) -> pd.DataFrame:
+    mm = pd.read_csv(path)
+    need = {"Department","Metric"}
+    if not need.issubset(mm.columns):
+        raise SystemExit("metrics_map.csv must have columns: Department, Metric")
+    mm["Department"] = mm["Department"].map(norm)
+    mm["Metric"] = mm["Metric"].map(norm)
+    if "Display_Order" in mm.columns:
+        mm = mm.sort_values(["Department","Display_Order","Metric"])
+    else:
+        mm = mm.sort_values(["Department","Metric"])
+    return mm
 
-    dv_status = DataValidation(type="list", formula1=f'"{",".join(VALIDATED_LIST)}"', allow_blank=True)
-    dv_date = DataValidation(type="date", allow_blank=True)
+def excel_col(n):
+    s = ""
+    while n:
+        n, r = divmod(n-1, 26)
+        s = chr(65 + r) + s
+    return s
 
-    for campus, cdf in df.groupby("Campus", dropna=False):
-        title = str(campus).strip()[:31] if pd.notna(campus) and str(campus).strip() else "Unknown"
-        ws = wb.create_sheet(title=title)
+def build_wide_table(df_dept: pd.DataFrame, metrics_order: list[str]) -> pd.DataFrame:
+    id_cols = ["Area","Campus","FSW"]
+    pv = df_dept.pivot_table(index=id_cols, columns="Metric", values="FSW_Value", aggfunc="first")
+    for m in metrics_order:
+        if m not in pv.columns:
+            pv[m] = np.nan
+    pv = pv[metrics_order]
+    validated_cols = [f"{m} - Validated" for m in metrics_order]
+    out = pv.reset_index()
+    for col in validated_cols:
+        out[col] = np.nan
+    return out, validated_cols
 
-        view = cdf[["FSW","Metric","FSW_Value"]].copy()
-        view["Validated_Value"] = np.nan
-        view["Validated"] = ""
-        view["Validation_Date"] = ""
-        view["Issues"] = ""
-        view["Services"] = ""
-        view["Referrals"] = ""
-        view["Notes"] = ""
+def stylesheet(ws):
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center")
+    last_col = excel_col(ws.max_column)
+    ws.freeze_panes = "D2"
+    ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
 
-        headers = ["FSW","Metric","FSW_Value","Validated_Value","Validated","Validation_Date","Issues","Services","Referrals","Notes"]
-        ws.append(headers)
-        for r in dataframe_to_rows(view, index=False, header=False):
-            ws.append(r)
+def size_columns(ws):
+    for col in range(1, ws.max_column+1):
+        ws.column_dimensions[excel_col(col)].width = 16
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 22
 
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = f"A1:J{ws.max_row}"
-
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(vertical="center")
-
-        for cell in ws["A"][1:]: cell.fill = READONLY_FILL
-        for cell in ws["B"][1:]: cell.fill = READONLY_FILL
-        for cell in ws["C"][1:]: cell.fill = READONLY_FILL
-
-        ws.add_data_validation(dv_status); dv_status.add(f"E2:E{ws.max_row}")
-        ws.add_data_validation(dv_date);   dv_date.add(f"F2:F{ws.max_row}")
-
-        for r in range(2, ws.max_row + 1):
-            d_cell, c_cell = f"D{r}", f"C{r}"
+def add_dropdowns_and_colors(ws, metrics_order):
+    num_metrics = len(metrics_order)
+    start_fsw = 4
+    start_val = 4 + num_metrics
+    for i in range(num_metrics):
+        fsw_col = excel_col(start_fsw + i)
+        val_col = excel_col(start_val + i)
+        for r in range(2, ws.max_row+1):
+            d_cell = f"{val_col}{r}"
+            c_cell = f"{fsw_col}{r}"
             ws.conditional_formatting.add(
                 d_cell,
                 FormulaRule(formula=[f'AND(NOT(ISBLANK({d_cell})), {d_cell}<>${c_cell})'],
@@ -93,69 +99,87 @@ def write_packet_excel(filename: str, df: pd.DataFrame) -> bytes:
                 FormulaRule(formula=[f'AND(NOT(ISBLANK({d_cell})), {d_cell}=${c_cell})'],
                             stopIfTrue=False, fill=GREEN_FILL)
             )
+    for cell in ws["A"][1:]: cell.fill = READONLY_FILL
+    for cell in ws["B"][1:]: cell.fill = READONLY_FILL
+    for cell in ws["C"][1:]: cell.fill = READONLY_FILL
 
-    bio = BytesIO()
-    wb.save(bio)
-    return bio.getvalue()
+def write_summary(wb, sheet_map, metrics_order):
+    ws = wb.create_sheet("Summary", 0)
+    ws["A1"].value = "Dashboard / Summary"
+    ws["A1"].font = Font(bold=True, size=14)
 
-left, right = st.columns(2)
-with left:
-    fsw_up = st.file_uploader("FSW_Master (xlsx/csv)", type=["xlsx","csv"])
-with right:
-    mm_up = st.file_uploader("metrics_map.csv", type=["csv"])
+    ws.append([])
+    ws.append(["Area","Metric","Total Rows","Validated Entered","Exact Matches","Mismatches"])
+    for cell in ws[3]:
+        cell.font = Font(bold=True)
 
-if fsw_up is None or mm_up is None:
-    st.info("Upload both files to continue.")
-    st.stop()
+    for area, (sname, last_row, fsw_start_col, val_start_col) in sheet_map.items():
+        if last_row < 2:
+            continue
+        for i, m in enumerate(metrics_order):
+            fsw_col = excel_col(fsw_start_col + i)
+            val_col = excel_col(val_start_col + i)
+            rng_fsw = f"'{sname}'!{fsw_col}2:{fsw_col}{last_row}"
+            rng_val = f"'{sname}'!{val_col}2:{val_col}{last_row}"
+            total_rows = f"=ROWS({rng_fsw})"
+            validated_entered = f"=COUNTIF({rng_val},\"<>\")"
+            exact_matches = f"=SUMPRODUCT(--({rng_val}={rng_fsw}),--({rng_val}<>\"\"))"
+            mismatches = f"=SUMPRODUCT(--({rng_val}<>{rng_fsw}),--({rng_val}<>\"\"))"
+            ws.append([area, m, total_rows, validated_entered, exact_matches, mismatches])
 
-fsw = load_any(fsw_up)
-mmap = load_any(mm_up)
+    last_col = excel_col(ws.max_column)
+    ws.auto_filter.ref = f"A3:{last_col}{ws.max_row}"
+    for col in range(1, ws.max_column+1):
+        ws.column_dimensions[excel_col(col)].width = 22
+    ws.freeze_panes = "A4"
 
-need_fsw = {"Month","Area","Campus","FSW","Metric","Value"}
-if missing := (need_fsw - set(fsw.columns)):
-    st.error(f"FSW_Master missing columns: {sorted(missing)}")
-    st.stop()
-if not {"Department","Metric"}.issubset(mmap.columns):
-    st.error("metrics_map.csv must have columns: Department, Metric")
-    st.stop()
+def build_workbook(out_path: Path, month: str, dept: str, df: pd.DataFrame, metrics_order: list[str]):
+    wb = Workbook()
+    wb.remove(wb.active)
 
-fsw = fsw.rename(columns={"Value":"FSW_Value"})
-master = fsw.merge(mmap[["Metric","Department"]], on="Metric", how="left")
-master = master.dropna(subset=["Department"])
+    sheet_meta = {}
 
-st.subheader("Filters")
-c1,c2,c3 = st.columns(3)
-months_all = [m for m in ["Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr","May"] if m in master["Month"].unique().tolist()]
-depts_all = sorted(master["Department"].dropna().unique().tolist())
-campuses_all = sorted(master["Campus"].dropna().unique().tolist())
+    for area in ["Central","West","East"]:
+        sub = df[df["Area"].astype(str).str.strip().str.casefold() == area.lower()]
+        ws = wb.create_sheet(area)
+        headers = ["Area","Campus","FSW"] + metrics_order + [f"{m} - Validated" for m in metrics_order]
+        ws.append(headers)
+        if not sub.empty:
+            wide, validated_cols = build_wide_table(sub, metrics_order)
+            for r in dataframe_to_rows(wide, index=False, header=False):
+                ws.append(r)
 
-months = c1.multiselect("Months", months_all, default=months_all)
-depts = c2.multiselect("Departments", depts_all, default=depts_all)
-campuses = c3.multiselect("Campuses", campuses_all, default=campuses_all)
+        stylesheet(ws)
+        size_columns(ws)
+        add_dropdowns_and_colors(ws, metrics_order)
 
-f = master.copy()
-if months:  f = f[f["Month"].isin(months)]
-if depts:   f = f[f["Department"].isin(depts)]
-if campuses:f = f[f["Campus"].isin(campuses)]
+        sheet_meta[area] = (area, ws.max_row, 4, 4+len(metrics_order))
 
-st.write(f"Rows selected: **{len(f)}** | FSWs: **{f['FSW'].nunique()}** | Metrics: **{f['Metric'].nunique()}**")
+    write_summary(wb, sheet_meta, metrics_order)
 
-if st.button("Build Packet ZIP"):
-    if f.empty:
-        st.warning("No rows match the filters.")
-    else:
-        memzip = BytesIO()
-        with ZipFile(memzip, "w", ZIP_DEFLATED) as zf:
-            for (month, dept), chunk in f.groupby(["Month","Department"], dropna=False):
-                chunk = chunk.sort_values(["Campus","FSW","Metric"]).copy()
-                xbytes = write_packet_excel(f"{dept}.xlsx", chunk)
-                arcname = f"{month}/{dept}.xlsx"
-                zf.writestr(arcname, xbytes)
-        memzip.seek(0)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M")
-        st.download_button(
-            "⬇️ Download Packets ZIP",
-            data=memzip,
-            file_name=f"DeptPackets_{stamp}.zip",
-            mime="application/zip"
-        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(out_path)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--master", required=True, help="FSW_Master.xlsx path")
+    ap.add_argument("--metrics_map", required=True, help="metrics_map.csv path")
+    ap.add_argument("--out_dir", required=True, help="Output folder")
+    args = ap.parse_args()
+
+    master = load_master(Path(args.master))
+    mmap = load_metrics_map(Path(args.metrics_map))
+
+    master = master.merge(mmap[["Metric","Department"]], on="Metric", how="left")
+    master = master.dropna(subset=["Department"])
+
+    for (month, dept), chunk in master.groupby(["Month","Department"], dropna=False):
+        metrics_order = mmap[mmap["Department"] == dept]["Metric"].tolist()
+        out_path = Path(args.out_dir) / str(month) / f"{dept}_WIDE.xlsx"
+        print(f"Writing {out_path} ...")
+        build_workbook(out_path, month, dept, chunk, metrics_order)
+
+    print(f"Done. Files in: {Path(args.out_dir).resolve()}")
+
+if __name__ == "__main__":
+    main()
