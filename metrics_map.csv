@@ -1,0 +1,45 @@
+Department,Metric,Display_Order
+Family Services,Caseload – Children,1
+Family Services,Families – Total,2
+Family Services,Returnees – 2nd Year (Cumulative),3
+Family Services,Returnees – 3rd Year (Cumulative),4
+Family Services,Families – Homeless (Cumulative),5
+Family Services,Families – Foster (Cumulative),6
+Family Services,Public Assistance – TANF (Cumulative),7
+Family Services,Public Assistance – SNAP (Cumulative),8
+Family Services,Public Assistance – WIC (Cumulative),9
+Family Services,Public Assistance – SSI (Cumulative),10
+Family Services,How many families on Active Duty (Cumulative),11
+Family Services,How many families with Veteran (Cumulative),12
+Family Services,Families Contacted re: Attendance (Monthly Only),13
+Family Services,Home Visits – Attendance (Monthly Only),14
+Family Services,How many working families (Both Parents) (Cumulative),15
+Family Services,How many NON working families (Neither Parent) (Cumulative),16
+Family Services,How many NON working single parents? (Cumulative),17
+Family Services,Referrals – Internal (Monthly),18
+Family Services,Referrals – External (Monthly),19
+Family Services,Services (Monthly),20
+Family Services,Services – PIR-Eligible (Counted) (Monthly),21
+Family Services,Children – Chronically Absent (Monthly),22
+Family Services,Children – On Attendance Plan (Monthly),23
+Family Services,Language – English (Cumulative),24
+Family Services,Language – Spanish (Cumulative),25
+Family Services,Language – Other (Cumulative),26
+Disabilities,Children – Disabilities (Cumulative),27
+Disabilities,Children – IEP (Cumulative),28
+Mental Health,Children – Behavior Concerns,29
+Mental Health,Social-Emotional Screening Completed (Cumulative),30
+Health,Medical Insurance – Medicaid (Cumulative),31
+Health,Medical Insurance – Other (Cumulative),32
+Health,Children – IHP (Cumulative),33
+Nutrition,Children – Food Allergies (Cumulative),34
+Nutrition,Children – Special Diet (Cumulative),35
+Education,Child Dev. Screening Completed,36
+Transportation,Number of Children utilizing ISD transportation,37
+Transportation,Number of Children utilizing HCHSP transportation,38
+Family Services,FPAs – Outcomes (Cumulative),39
+Family Services,FPA – Goals (Cumulative),40
+Family Services,FPA – Follow-Ups (Monthly),41
+Family Services,FPA Home Visit (Cumulative),42
+Family Services,Parent Meetings – Held (Monthly),43
+Family Services,Campus Events – Held,44
