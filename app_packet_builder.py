@@ -13,19 +13,20 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 
-
-st.set_page_config(page_title='HCHSP IDT Department Validation (ZIP File)', layout='wide')
+# ---------------- UI SETUP ----------------
+st.set_page_config(page_title='HCHSP Department IDT Files', layout='wide')
 st.title('Department Packets - Wide Excel ZIP (normalized)')
 
 st.markdown("""
-**What this builds (per Month × Department):**
-- Sheets: **Central**, **West**, **East**
+
 - Department cell turns **green** if it equals the FSW value, **red** if it differs.
 
 **Upload:**
-1) `FSW_Master` (xlsx/csv)
-2) `metrics_map.csv`
+1) `FSW_Master` (xlsx/csv) with columns: **Month, Area, Campus, FSW, Metric, Value** (or **FSW_Value**)  
+2) `metrics_map.csv` with columns: **Department, Metric** (exact labels you want as columns)
 
+*(Optional)* a roster file (xlsx/csv) with **Area, Campus, FSW** to ensure full coverage; we also union with master so no FSW disappears.
+""")
 
 AREA_SHEETS = ['Central','West','East']
 READONLY_FILL = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
@@ -33,7 +34,7 @@ GREEN_FILL    = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type=
 RED_FILL      = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
 VALID_STATUSES = ['Validated','Mismatch','Unable to Validate']
 
-
+# ---------------- Helpers ----------------
 def _norm(s):
     return s.replace('\u2013','-').replace('\u2014','-').strip() if isinstance(s,str) else s
 
@@ -296,13 +297,14 @@ def build_workbook_bytes(
     wb.save(bio)
     return bio.getvalue()
 
+# ---------------- INPUTS ----------------
 left, right = st.columns(2)
 with left:
     fsw_up = st.file_uploader('FSW_Master (xlsx/csv)', type=['xlsx','csv'])
 with right:
     mm_up = st.file_uploader('metrics_map.csv (Department, Metric)', type=['csv'])
 
-roster_up = st.file_uploader('FSW Info Sheet', type=['xlsx','csv'])
+roster_up = st.file_uploader('Optional: Roster (xlsx/csv) with Area, Campus, FSW', type=['xlsx','csv'])
 
 if fsw_up is None or mm_up is None:
     st.info('Upload FSW_Master and metrics_map to continue.')
@@ -375,7 +377,7 @@ mf = master.copy()
 if months: mf = mf[mf['Month'].isin(months)]
 if camp:   mf = mf[mf['Campus'].isin(camp)]
 
-
+# ---------------- Build ZIP ----------------
 if st.button('Build ZIP of Department Packets (Excel)'):
     if mf.empty:
         st.warning('No rows after filters. Check Months/Campuses.')
@@ -422,7 +424,7 @@ if st.button('Build ZIP of Department Packets (Excel)'):
                     zf.writestr(f"{month}/{safe_dept}_DEPT.xlsx", xbytes)
 
         memzip.seek(0)
-        stamp = datetime.now().strftime('%Y%m%d')
+        stamp = datetime.now().strftime('%Y%m%d_%H%M')
         st.download_button(
             'Download Department Packets ZIP',
             data=memzip,
