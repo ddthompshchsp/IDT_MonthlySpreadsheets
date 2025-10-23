@@ -110,24 +110,25 @@ def add_styles_filters(ws):
 def add_match_colors(ws, metric_pairs, start_row=2, end_row=None):
     if end_row is None:
         end_row = ws.max_row
+    if end_row < start_row:
+        return  # nothing to format
     for fsw_col, dept_col in metric_pairs:
-        for r in range(start_row, end_row+1):
-            d_cell = f'{dept_col}{r}'
-            c_cell = f'{fsw_col}{r}'
-            # RED when both present and not equal
-            ws.conditional_formatting.add(
-                d_cell,
-                FormulaRule(formula=[f'AND({d_cell}<>"", {c_cell}<>"", {d_cell}<> {c_cell})'],
-                            stopIfTrue=False, fill=RED_FILL)
-            )
-            # GREEN when both present and equal
-            ws.conditional_formatting.add(
-                d_cell,
-                FormulaRule(formula=[f'AND({d_cell}<>"", {c_cell}<>"", {d_cell}= {c_cell})'],
-                            stopIfTrue=False, fill=GREEN_FILL)
-            )
+        # RED when both present and not equal
+        ws.conditional_formatting.add(
+            f'{dept_col}{start_row}:{dept_col}{end_row}',
+            FormulaRule(formula=[f'AND({dept_col}{start_row}<>"", {fsw_col}{start_row}<>"", {dept_col}{start_row}<> {fsw_col}{start_row})'],
+                        stopIfTrue=False, fill=RED_FILL)
+        )
+        # GREEN when both present and equal
+        ws.conditional_formatting.add(
+            f'{dept_col}{start_row}:{dept_col}{end_row}',
+            FormulaRule(formula=[f'AND({dept_col}{start_row}<>"", {fsw_col}{start_row}<>"", {dept_col}{start_row}= {fsw_col}{start_row})'],
+                        stopIfTrue=False, fill=GREEN_FILL)
+        )
 
 def add_validations(ws, col_letter, max_row):
+    if max_row < 2:
+        return  # avoid invalid ranges like K2:K1
     dv = DataValidation(type='list', formula1='"' + ','.join(VALID_STATUSES) + '"', allow_blank=True)
     ws.add_data_validation(dv)
     dv.add(f'{col_letter}2:{col_letter}{max_row}')
@@ -167,15 +168,24 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area
         pv = pd.DataFrame(columns=['Area','Campus','FSW'] + metrics_order)
 
     # Left-join: ensure every FSW appears
-    base = roster_area_df.copy()
+    if roster_area_df is not None and not roster_area_df.empty:
+        base = roster_area_df.copy()
+    else:
+        # If no roster for this area, create an empty frame with required ID columns
+        base = pd.DataFrame(columns=['Area','Campus','FSW'])
+
     if not pv.empty:
         base = base.merge(pv, on=['Area','Campus','FSW'], how='left')
     else:
         for m in metrics_order:
             base[m] = np.nan
 
+    # Optional: fill missing FSW values as zero
     if fill_missing_zero and metrics_order:
-        base[metrics_order] = base[metrics_order].fillna(0)
+        # Only try if columns exist
+        present = [m for m in metrics_order if m in base.columns]
+        if present:
+            base[present] = base[present].fillna(0)
 
     # Dept entry columns + trailing admin cols
     for m in metrics_order:
@@ -187,27 +197,38 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area
     base['Referrals'] = ''
     base['Notes'] = ''
 
+    # Add the Month column (even if no rows; we’ll still have just a header)
     base.insert(0, 'Month', month_value)
-    ordered = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
-    base = base[ordered]
 
-    for r in dataframe_to_rows(base, index=False, header=False):
-        ws.append(r)
+    # Ensure all header columns exist before ordering
+    for col in ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']:
+        if col not in base.columns:
+            base[col] = []  # add empty col so .loc works below
+
+    ordered = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
+    base = base.loc[:, ordered]
+
+    # Write rows (if any)
+    if not base.empty:
+        for r in dataframe_to_rows(base, index=False, header=False):
+            ws.append(r)
 
     add_styles_filters(ws)
 
-    # Conditional formatting pairs
+    # Conditional formatting pairs (only if there are data rows)
     metric_pairs = []
     start_idx = 5  # Month..FSW = 4
     for i, m in enumerate(metrics_order):
         fsw_idx  = start_idx + 2*i
         dept_idx = start_idx + 2*i + 1
         metric_pairs.append((excel_col(fsw_idx), excel_col(dept_idx)))
-    add_match_colors(ws, metric_pairs)
+    if ws.max_row >= 2 and metric_pairs:
+        add_match_colors(ws, metric_pairs, start_row=2, end_row=ws.max_row)
 
-    # Validated dropdown
+    # Validated dropdown (only if there are data rows)
     validated_idx = 4 + 2*len(metrics_order) + 1
-    add_validations(ws, excel_col(validated_idx), ws.max_row)
+    if ws.max_row >= 2:
+        add_validations(ws, excel_col(validated_idx), ws.max_row)
 
     return ws
 
