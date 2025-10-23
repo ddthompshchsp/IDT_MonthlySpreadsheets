@@ -18,7 +18,7 @@ st.title('Department Packets - Wide Excel ZIP')
 st.markdown('''
 **FSW values come directly from your FSW_Master for the selected month(s).**  
 Each department workbook shows the FSW’s true values for that department’s metrics, with a side-by-side column for the department to enter/validate.  
-Toggle **"Fill missing FSW metric values with 0"** to prefill blanks as 0.
+Use the toggles to prefill blanks and/or prefill department columns from FSW values.
 ''')
 
 # ---------------- CONSTANTS ----------------
@@ -146,7 +146,16 @@ def ensure_roster(master_month_df, roster_df=None):
     )
     return roster.sort_values(['Area','Campus','FSW'])
 
-def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area_df, metrics_order, fill_missing_zero=False):
+def build_wide_sheet(
+    wb,
+    sheet_name,
+    month_value,
+    roster_area_df,
+    fsw_month_area_df,
+    metrics_order,
+    fill_missing_zero=False,
+    prefill_dept_from_fsw=True
+):
     ws = wb.create_sheet(sheet_name)
 
     interleaved = []
@@ -171,7 +180,6 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area
     if roster_area_df is not None and not roster_area_df.empty:
         base = roster_area_df.copy()
     else:
-        # If no roster for this area, create an empty frame with required ID columns
         base = pd.DataFrame(columns=['Area','Campus','FSW'])
 
     if not pv.empty:
@@ -182,14 +190,17 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area
 
     # Optional: fill missing FSW values as zero
     if fill_missing_zero and metrics_order:
-        # Only try if columns exist
         present = [m for m in metrics_order if m in base.columns]
         if present:
             base[present] = base[present].fillna(0)
 
-    # Dept entry columns + trailing admin cols
+    # Department entry columns + trailing admin cols
     for m in metrics_order:
-        base[f'Department - {m}'] = ''  # department enters here
+        if prefill_dept_from_fsw and m in base.columns:
+            base[f'Department - {m}'] = base[m]  # <-- PREFILL with FSW values
+        else:
+            base[f'Department - {m}'] = ''       # leave blank
+
     base['Validated'] = ''
     base['Validation_Date'] = ''
     base['Issues'] = ''
@@ -197,7 +208,7 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area
     base['Referrals'] = ''
     base['Notes'] = ''
 
-    # Add the Month column (even if no rows; we’ll still have just a header)
+    # Add the Month column
     base.insert(0, 'Month', month_value)
 
     # Ensure all header columns exist before ordering
@@ -232,7 +243,14 @@ def build_wide_sheet(wb, sheet_name, month_value, roster_area_df, fsw_month_area
 
     return ws
 
-def build_workbook_bytes(master_month_df, month_value, metrics_order, roster_df=None, fill_missing_zero=False):
+def build_workbook_bytes(
+    master_month_df,
+    month_value,
+    metrics_order,
+    roster_df=None,
+    fill_missing_zero=False,
+    prefill_dept_from_fsw=True
+):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -246,7 +264,8 @@ def build_workbook_bytes(master_month_df, month_value, metrics_order, roster_df=
             roster_area_df=roster_area,
             fsw_month_area_df=fsw_area,
             metrics_order=metrics_order,
-            fill_missing_zero=fill_missing_zero
+            fill_missing_zero=fill_missing_zero,
+            prefill_dept_from_fsw=prefill_dept_from_fsw
         )
 
     bio = BytesIO()
@@ -293,7 +312,7 @@ mmap['Metric']     = mmap['Metric'].astype(str).str.strip()
 master = fsw.merge(mmap[['Metric','Department']], on='Metric', how='left')
 
 # ---------------- FILTERS ----------------
-st.subheader('Filters')
+st.subheader('Filters & Options')
 c1, c2, c3 = st.columns(3)
 
 months_all = [m for m in ['Sep','Oct','Nov','Dec','Jan','Feb','Mar','Apr','May']
@@ -306,6 +325,7 @@ depts  = c2.multiselect('Departments', depts_all, default=depts_all)
 camp   = c3.multiselect('Campuses', camp_all, default=camp_all)
 
 fill_zero = st.checkbox('Fill missing FSW metric values with 0', value=False)
+prefill_dept = st.checkbox('Prefill Department columns with FSW values', value=True)
 
 mf = master.copy()
 if months: mf = mf[mf['Month'].isin(months)]
@@ -334,7 +354,8 @@ if st.button('Build ZIP of Department Packets (Excel)'):
                         month_value=month,
                         metrics_order=metrics_order,
                         roster_df=roster_df,
-                        fill_missing_zero=fill_zero
+                        fill_missing_zero=fill_zero,
+                        prefill_dept_from_fsw=prefill_dept
                     )
                     # One file per department per month
                     safe_dept = "".join(ch for ch in dept if ch.isalnum() or ch in (" ","-","_")).strip().replace(" ","_")
