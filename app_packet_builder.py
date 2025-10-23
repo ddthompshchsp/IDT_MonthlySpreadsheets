@@ -15,7 +15,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 # ---------------- UI SETUP ----------------
 st.set_page_config(page_title='HCHSP Department IDT Files (ZIP)', layout='wide')
-st.title('Department Packets - Wide Excel ZIP (normalized)')
+st.title('HCHSP Department IDT Files (ZIP)')
 
 st.markdown("""
 
