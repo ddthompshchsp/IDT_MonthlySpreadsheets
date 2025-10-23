@@ -24,7 +24,8 @@ st.markdown("""
 **Upload:**
 1) `FSW_Master` (xlsx/csv) with columns: **Month, Area, Campus, FSW, Metric, Value** (or **FSW_Value**)  
 2) `metrics_map.csv` with columns: **Department, Metric** (exact labels you want as columns)
-
+*(Optional)* FSW Info Sheet (xlsx/csv) with **Area, Campus, FSW** to ensure full coverage; we also union with master so no FSW disappears.
+""")
 
 
 AREA_SHEETS = ['Central','West','East']
