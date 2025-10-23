@@ -11,29 +11,30 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.worksheet.datavalidation import DataValidation
 
-# ---------------- UI SETUP ----------------
-st.set_page_config(page_title='Department Packets - Wide Excel ZIP', layout='wide')
-st.title('Department Packets - Wide Excel ZIP')
+# ---------- UI SETUP ----------
+st.set_page_config(page_title='Department Packets - Wide Excel ZIP (hardened)', layout='wide')
+st.title('Department Packets - Wide Excel ZIP (hardened)')
 
-st.markdown('''
-Uploads:
-1) **FSW_Master** (xlsx/csv) with columns: Month, Area, Campus, FSW, Metric, Value (or FSW_Value)  
-2) **metrics_map.csv** with columns: Department, Metric (defines which metrics each department owns)
+st.markdown("""
+**Upload:**
+1) `FSW_Master` (xlsx/csv) with columns: **Month, Area, Campus, FSW, Metric, Value** (or **FSW_Value**)
+2) `metrics_map.csv` with columns: **Department, Metric** (the exact metric names to appear for each department)
 
-Output:
-- For each selected **Month × Department**, an Excel workbook with **Central**, **West**, **East** sheets.
-- Columns: Month, Area, Campus, FSW, then **each Metric** (prefilled from FSW master), then **Department – Metric** (blank for staff input), then Validated, Validation_Date, Issues, Services, Referrals, Notes.
-- Cells in **Department – Metric** turn **green** if they match the FSW value, **red** if not.
-''')
+**Output per Month × Department:**
+- Sheets: **Central**, **West**, **East**
+- Columns: **Month, Area, Campus, FSW** (prefilled from master, gray)  
+  Then for each metric: **[FSW metric column (prefilled)]**, **[Department - metric (blank)]**  
+  Then **Validated, Validation_Date, Issues, Services, Referrals, Notes**
+- Conditional formatting: **green** if Dept value = FSW value, **red** otherwise.
+""")
 
-# ---------------- CONSTANTS ----------------
 AREA_SHEETS = ['Central','West','East']
 READONLY_FILL = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
 GREEN_FILL    = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
 RED_FILL      = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
 VALID_STATUSES = ['Validated','Mismatch','Unable to Validate']
 
-# ---------------- HELPERS ----------------
+# ---------- Helpers ----------
 def _norm(s):
     return s.replace('\u2013','-').replace('\u2014','-').strip() if isinstance(s,str) else s
 
@@ -51,10 +52,7 @@ def load_any(uploaded):
     return df
 
 def normalize_master_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize flexible headers to: Month, Area, Campus, FSW, Metric, FSW_Value
-    Accepts case-insensitive synonyms for Area/Campus/FSW/Value.
-    """
+    """Normalize flexible headers to: Month, Area, Campus, FSW, Metric, FSW_Value."""
     lower = {str(c).strip().lower(): c for c in df.columns}
 
     def pick(*cands):
@@ -72,7 +70,7 @@ def normalize_master_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     needed = [col_month, col_area, col_campus, col_fsw, col_metric, col_value]
     if any(c is None for c in needed):
-        return df  # caller will validate and show error
+        return df  # caller will error
 
     out = df.rename(columns={
         col_month:  'Month',
@@ -94,25 +92,20 @@ def excel_col(n:int)->str:
     return s
 
 def add_styles_filters(ws):
-    # Header styling
     for cell in ws[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(vertical='center')
     ws.freeze_panes = 'E2'
-
-    # Auto-filter
     last_col = excel_col(ws.max_column)
     ws.auto_filter.ref = f'A1:{last_col}{ws.max_row}'
 
-    # Column widths
     for i in range(1, ws.max_column+1):
         ws.column_dimensions[excel_col(i)].width = 16
-    ws.column_dimensions['A'].width = 8   # Month
-    ws.column_dimensions['B'].width = 12  # Area
-    ws.column_dimensions['C'].width = 18  # Campus
-    ws.column_dimensions['D'].width = 22  # FSW
+    ws.column_dimensions['A'].width = 8
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 18
+    ws.column_dimensions['D'].width = 22
 
-    # Gray read-only for Month/Area/Campus/FSW rows
     for col_letter in ['A','B','C','D']:
         for cell in ws[col_letter][1:]:
             cell.fill = READONLY_FILL
@@ -122,9 +115,7 @@ def add_match_colors(ws, metric_pairs, start_row=2, end_row=None):
         end_row = ws.max_row
     if end_row < start_row:
         return
-    # For each Metric: compare Department cell vs FSW cell
     for fsw_col, dept_col in metric_pairs:
-        # Apply over the data range; Excel will adjust the row in the formula
         ws.conditional_formatting.add(
             f'{dept_col}{start_row}:{dept_col}{end_row}',
             FormulaRule(formula=[f'AND({dept_col}{start_row}<>"", {fsw_col}{start_row}<>"", {dept_col}{start_row}<> {fsw_col}{start_row})'],
@@ -138,23 +129,28 @@ def add_match_colors(ws, metric_pairs, start_row=2, end_row=None):
 
 def add_validations(ws, col_letter, max_row):
     if max_row < 2:
-        return  # avoid invalid ranges like K2:K1
+        return
     dv = DataValidation(type='list', formula1='"' + ','.join(VALID_STATUSES) + '"', allow_blank=True)
     ws.add_data_validation(dv)
     dv.add(f'{col_letter}2:{col_letter}{max_row}')
 
-def ensure_roster(master_month_df, roster_df=None):
-    """Guarantee we have full FSW list per area/campus (roster preferred)."""
+def ensure_roster_union(master_month_df, roster_df=None):
+    """
+    Return the union of FSWs found in master_month_df and in roster (if provided),
+    so we never drop rows because roster is incomplete.
+    """
+    from_master = master_month_df[['Area','Campus','FSW']].drop_duplicates()
     if roster_df is not None and set(['Area','Campus','FSW']).issubset(roster_df.columns):
-        roster = roster_df[['Area','Campus','FSW']].drop_duplicates()
+        from_roster = roster_df[['Area','Campus','FSW']].drop_duplicates()
+        all_rows = pd.concat([from_master, from_roster], ignore_index=True).drop_duplicates()
     else:
-        roster = master_month_df[['Area','Campus','FSW']].drop_duplicates()
-    roster = roster.assign(
-        Area   = roster['Area'].astype(str).str.strip(),
-        Campus = roster['Campus'].astype(str).str.strip(),
-        FSW    = roster['FSW'].astype(str).str.strip()
+        all_rows = from_master
+    all_rows = all_rows.assign(
+        Area   = all_rows['Area'].astype(str).str.strip(),
+        Campus = all_rows['Campus'].astype(str).str.strip(),
+        FSW    = all_rows['FSW'].astype(str).str.strip(),
     )
-    return roster.sort_values(['Area','Campus','FSW'])
+    return all_rows.sort_values(['Area','Campus','FSW'])
 
 def build_wide_sheet(
     wb,
@@ -163,11 +159,11 @@ def build_wide_sheet(
     roster_area_df,
     fsw_month_area_df,
     metrics_order,
-    fill_missing_zero=False,          # affects FSW value columns only
+    fill_missing_zero=False,  # affects FSW metric columns only
 ):
     ws = wb.create_sheet(sheet_name)
 
-    # Build headers: interleaved (FSW metric, Department metric)
+    # Interleaved header list: [Metric, Department - Metric] × N
     interleaved = []
     for m in metrics_order:
         interleaved += [m, f'Department - {m}']
@@ -175,11 +171,11 @@ def build_wide_sheet(
     headers = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
     ws.append(headers)
 
-    # Pivot FSW values for this area+month -> one row per FSW with metric columns
+    # Pivot FSW values for this area/month → one row per FSW, metric columns
     if not fsw_month_area_df.empty:
         pv = fsw_month_area_df.pivot_table(index=['Area','Campus','FSW'],
                                            columns='Metric', values='FSW_Value', aggfunc='first')
-        # Ensure all requested metrics exist as columns
+        # Ensure all target metrics exist
         for m in metrics_order:
             if m not in pv.columns:
                 pv[m] = np.nan
@@ -187,25 +183,26 @@ def build_wide_sheet(
     else:
         pv = pd.DataFrame(columns=['Area','Campus','FSW'] + metrics_order)
 
-    # Left-join roster so every FSW appears (even if they have no values)
+    # Base rows: everyone in the area (from union of roster & master)
     base = roster_area_df.copy() if (roster_area_df is not None and not roster_area_df.empty) else pd.DataFrame(columns=['Area','Campus','FSW'])
     if not pv.empty:
         base = base.merge(pv, on=['Area','Campus','FSW'], how='left')
     else:
+        # still create empty FSW metric columns so the Department columns appear
         for m in metrics_order:
             base[m] = np.nan
 
-    # Optionally fill missing FSW values with zero (does NOT touch Department columns)
+    # Optionally zero-fill missing FSW metric values
     if fill_missing_zero and metrics_order:
         present = [m for m in metrics_order if m in base.columns]
         if present:
             base[present] = base[present].fillna(0)
 
-    # Department entry columns should be BLANK for staff input
+    # Department entry columns (blank by design)
     for m in metrics_order:
-        base[f'Department - {m}'] = ''  # <-- BLANK by design
+        base[f'Department - {m}'] = ''
 
-    # Admin columns
+    # Trailing admin columns
     base['Validated'] = ''
     base['Validation_Date'] = ''
     base['Issues'] = ''
@@ -213,27 +210,27 @@ def build_wide_sheet(
     base['Referrals'] = ''
     base['Notes'] = ''
 
-    # Month column first
+    # Add Month column
     base.insert(0, 'Month', month_value)
 
-    # Ensure all header columns exist before ordering
+    # Ensure all required header columns exist before ordering
     for col in ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']:
         if col not in base.columns:
             base[col] = []
 
-    # Reorder columns
+    # Reorder
     ordered = ['Month','Area','Campus','FSW'] + interleaved + ['Validated','Validation_Date','Issues','Services','Referrals','Notes']
     base = base.loc[:, ordered]
 
-    # Write rows
+    # Write rows (if any)
     if not base.empty:
         for r in dataframe_to_rows(base, index=False, header=False):
             ws.append(r)
 
-    # Styling, filters
+    # Styles & filters
     add_styles_filters(ws)
 
-    # Conditional formatting pairs: compare Department vs FSW metric
+    # Conditional formatting pairs (Dept vs FSW)
     metric_pairs = []
     start_idx = 5  # Month..FSW = 4 columns
     for i, m in enumerate(metrics_order):
@@ -260,7 +257,8 @@ def build_workbook_bytes(
     wb = Workbook()
     wb.remove(wb.active)
 
-    roster_all = ensure_roster(master_month_df, roster_df)
+    # Union of FSWs from master + roster (prevents empty sheets)
+    roster_all = ensure_roster_union(master_month_df, roster_df)
 
     for area in AREA_SHEETS:
         roster_area = roster_all[roster_all['Area'].str.casefold() == area.lower()].copy()
@@ -277,7 +275,7 @@ def build_workbook_bytes(
     wb.save(bio)
     return bio.getvalue()
 
-# ---------------- INPUTS -----------------
+# ---------- INPUTS ----------
 left, right = st.columns(2)
 with left:
     fsw_up = st.file_uploader('FSW_Master (xlsx/csv)', type=['xlsx','csv'])
@@ -294,29 +292,39 @@ fsw_raw = load_any(fsw_up)
 mmap = load_any(mm_up)
 roster_df = load_any(roster_up) if roster_up is not None else None
 
-# Normalize master headers to: Month, Area, Campus, FSW, Metric, FSW_Value
+# Standardize FSW master headers
 fsw = normalize_master_columns(fsw_raw)
 
-# Validate required columns after normalization
 need_cols = {'Month','Area','Campus','FSW','Metric','FSW_Value'}
 missing = need_cols - set(fsw.columns)
 if missing:
     st.error(f"FSW_Master is missing columns: {sorted(missing)}")
     st.stop()
 
-# metrics_map check
 if not {'Department','Metric'}.issubset(mmap.columns):
     st.error('metrics_map.csv must have columns: Department, Metric')
     st.stop()
 
-# Clean map values
+# Clean values
+for c in ['Month','Area','Campus','FSW','Metric']:
+    fsw[c] = fsw[c].astype(str).str.strip()
 mmap['Department'] = mmap['Department'].astype(str).str.strip()
 mmap['Metric']     = mmap['Metric'].astype(str).str.strip()
 
-# Attach Department to master rows (keeps all master metrics)
+# Attach Department to master (left join keeps all master rows)
 master = fsw.merge(mmap[['Metric','Department']], on='Metric', how='left')
 
-# ---------------- FILTERS ----------------
+# ---------- Debug panel ----------
+with st.expander("Debug / Data Health", expanded=False):
+    st.write("Rows in FSW_Master:", len(master))
+    st.write("Unique Months:", sorted(master['Month'].dropna().unique().tolist()))
+    st.write("Unique Campuses:", len(master['Campus'].dropna().unique()))
+    st.write("Unique FSWs:", master['FSW'].nunique())
+    # How many metrics map to a department
+    mm_counts = mmap.groupby('Department')['Metric'].count().rename('Metric_Count').reset_index()
+    st.dataframe(mm_counts)
+
+# ---------- Filters ----------
 st.subheader('Filters & Options')
 c1, c2, c3 = st.columns(3)
 
@@ -329,40 +337,62 @@ months = c1.multiselect('Months', months_all, default=months_all)
 depts  = c2.multiselect('Departments', depts_all, default=depts_all)
 camp   = c3.multiselect('Campuses', camp_all, default=camp_all)
 
-fill_zero = st.checkbox('Fill missing **FSW** metric values with 0 (Department columns remain blank)', value=False)
+fill_zero = st.checkbox('Fill missing FSW metric values with 0 (Department columns stay blank)', value=False)
 
 mf = master.copy()
 if months: mf = mf[mf['Month'].isin(months)]
 if camp:   mf = mf[mf['Campus'].isin(camp)]
 
-# ---------------- BUILD ZIP ----------------
+# ---------- Build ZIP ----------
 if st.button('Build ZIP of Department Packets (Excel)'):
     if mf.empty:
-        st.warning('No rows after filters.')
+        st.warning('No rows after filters. Check Months/Campuses.')
     else:
         memzip = BytesIO()
         with ZipFile(memzip, 'w', ZIP_DEFLATED) as zf:
             for month in sorted(mf['Month'].dropna().unique().tolist()):
                 m_month = mf[mf['Month'] == month].copy()
-                # Departments to generate (use selection if provided)
-                for dept in (depts if depts else sorted(mmap['Department'].dropna().unique())):
-                    # Ordered metrics for this department
+                # If user selected departments, use those; otherwise all mapped depts
+                target_depts = depts if depts else sorted(mmap['Department'].dropna().unique())
+                for dept in target_depts:
+                    # Metrics for this department (order preserved from CSV)
                     metrics_order = mmap.loc[mmap['Department'] == dept, 'Metric'].tolist()
 
-                    # Slice the FSW master to only this dept's metrics
+                    if len(metrics_order) == 0:
+                        # Still make an empty template with Month/Area/Campus/FSW + trailing admin cols
+                        xbytes = build_workbook_bytes(
+                            master_month_df=m_month[['Month','Area','Campus','FSW','Metric','FSW_Value']].copy(),
+                            month_value=month,
+                            metrics_order=[],
+                            roster_df=roster_df,
+                            fill_missing_zero=fill_zero,
+                        )
+                        safe_dept = "".join(ch for ch in dept if ch.isalnum() or ch in (" ","-","_")).strip().replace(" ","_") or "Unmapped"
+                        zf.writestr(f"{month}/{safe_dept}_DEPT.xlsx", xbytes)
+                        continue
+
+                    # Use only rows that belong to this department's metrics
                     month_for_metrics = m_month[m_month['Metric'].isin(metrics_order)][
                         ['Month','Area','Campus','FSW','Metric','FSW_Value']
                     ].copy()
+
+                    # If no FSW rows match (e.g., master is missing this dept’s metrics this month),
+                    # still create columns for those metrics so teams have places to enter numbers.
+                    if month_for_metrics.empty:
+                        # fabricate an empty frame that still has the required columns
+                        month_for_metrics = m_month[['Month','Area','Campus','FSW']].drop_duplicates().copy()
+                        # add empty metric/value columns so pivot formatting works
+                        month_for_metrics['Metric'] = pd.Series(dtype=str)
+                        month_for_metrics['FSW_Value'] = pd.Series(dtype=float)
 
                     xbytes = build_workbook_bytes(
                         master_month_df=month_for_metrics,
                         month_value=month,
                         metrics_order=metrics_order,
                         roster_df=roster_df,
-                        fill_missing_zero=fill_zero,  # FSW columns only
+                        fill_missing_zero=fill_zero,
                     )
 
-                    # Safe filename
                     safe_dept = "".join(ch for ch in dept if ch.isalnum() or ch in (" ","-","_")).strip().replace(" ","_")
                     zf.writestr(f"{month}/{safe_dept}_DEPT.xlsx", xbytes)
 
